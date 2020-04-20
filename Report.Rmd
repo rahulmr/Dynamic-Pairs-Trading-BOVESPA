@@ -1,0 +1,408 @@
+---
+title: "Long & Short trading with brazilian ETF's"
+author: 
+- name: "Lucas S. Macoris"
+  affiliation: "PhD Student at Insper - Institute of Research - São Paulo - Brazil"
+  email: "Contact: lucassm4@al.insper.edu.br"
+date: "`r paste0('Date: ',Sys.Date())`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## **About this document**
+
+This document^[The contents expressed herein are exclusively designed for educational purposes and does not represent, in any circumstances, the opinion of **Insper - Institute of Research**. This content should not be viewed as a financial advise. For additional information, contact can be made by email: lucassm4@al.insper.edu.br.] is an application of a Pairs Trading Strategy using the Kalman Filter in order to dinamically update the hedge ratios of a pair of assets. This example is based on *Kris Longmore's* post [*"Kalman Filter Example: Pairs Trading in R*"](https://robotwealth.com/kalman-filter-pairs-trading-r/) in [RobotWealth](https://robotwealth.com/).
+
+In this sense, we'll proceed by the following steps:
+
+1. Select a bundle of ETF brazilian traded securities;
+2. Perform cointegration and unit-root testing in several pairs of such assets;
+3. Perform the pairs trading analysis with each pair; and
+4. Compare the results and point to which pairs are the most interesting to trade on.
+
+```{r packages, warning=FALSE,message=FALSE}
+
+#Loading the necessary packages
+
+library(quantmod)
+library(kableExtra)
+library(dplyr)
+library(tseries)
+library(lubridate)
+
+```
+
+## **Finding profitable pair trading opportunities**
+
+In order to find feasible pair trading opportunities, we'll keep *BOVA11*, the most liquid brazilian ETF, while searching for other possibilities for pair trading according to statistical and financial criteria.
+
+By having a first look at the available *ETFs* traded in *B3*, only some of them have a reasonable volume of transactions per day. Thus, before proceeding to the evaluation by any criteria, we'll focus on the following ETF's in order to form a pair transaction with *BOVA11*:  *SMALL11*, *PIBB11* and *BOVV11*.
+
+```{r Source,warning=FALSE,message=FALSE}
+
+BOVA11.SA<-read.csv('BOVA11.csv',sep='')[,c(1,5)]
+names(BOVA11.SA)<-c('Date','Close')
+
+SMAL11.SA<-read.csv('SMAL11.csv',sep='')[,c(1,5)]
+names(SMAL11.SA)<-c('Date','Close')
+
+BOVV11.SA<-read.csv('BOVV11.csv',sep='')[,c(1,5)]
+names(BOVV11.SA)<-c('Date','Close')
+
+PIBB11.SA<-read.csv('PIBB11.csv',sep='')[,c(1,5)]
+names(PIBB11.SA)<-c('Date','Close')
+
+
+Stock<-cbind(BOVA11.SA,SMAL11.SA[,2],
+                       PIBB11.SA[,2],
+                       BOVV11.SA[,2])
+
+Stock$Date<-ymd_hms(Stock$Date,truncated = 3)
+
+Stock<-as.xts(Stock[,2:5],order.by = Stock$Date)
+names(Stock)<-c('BOVA11.SA','SMAL11.SA','PIBB11.SA','BOVV11.SA')
+
+rm(list=ls()[-5])
+
+#Check for stationarity
+
+
+Assets<-c('BOVA11.SA',
+          'SMAL11.SA',
+          'PIBB11.SA',
+          'BOVV11.SA')
+
+
+Tests<-data.frame(Asset=NA,PP=NA,ADF=NA,Decision=NA)
+
+for (i in 2:length(Assets)){
+  
+  PP<-PP.test(as.numeric(Stock[,1]-Stock[,i]))$p.value
+  ADF<-adf.test(as.numeric(Stock[,1]-Stock[,i]),k=1)$p.value
+
+  Tests<-rbind(Tests,c(Assets[i],round(PP,4),round(ADF,4)))
+}
+
+Tests[-1,]%>%arrange(ADF)%>%mutate(Decision=ifelse(ADF<0.10,'Stationary','Non-Stationary'))%>%
+  kable(row.names=FALSE)%>%kable_styling(bootstrap_options = 'responsive')
+
+```
+
+
+## **Allowing for time-varying relationship: the use of the Kalman Filter**
+
+
+The relationship tested before through the Augmented-Dickey-Fuller and Phillips-Perron tests was made by a simple spread between the two prices, considering an one-by-one relationship. Notwithstanding, we can think of a general linear-combination (with an arbitrary scalar multiplying the price of *BOVA11*) that makes the spread stationary. More than that, by using the Kalman Filter, we can update this relationship (by updating the intercept and the $\hat\beta$, which refers to the "hedge ratio") and accomodate a non-linear cointegration between a pair of assets.
+
+Therefore, the following code estimates, for each asset, a dynamic cointegration relationship with *BOVA11*, which will be stored in the fuction `Kalman()`. After that, we provide the results of the Kalman Filter estimation by plotting the residuals and repeating the ADF and P-P tests in the residual series in order to verify the stationarity of each spread.
+
+Finally, we discuss the output of the estimation and use the generated information to proceed to the pairs-trading strategy implementation.
+
+```{r Kalman Filter,message=FALSE,warning=FALSE}
+
+Kalman<-function(z){
+  
+  
+    pairs<-cbind(Stock[,1],
+                 Stock[,z])
+    
+    names(pairs)<-c('BOVA11',paste0(Assets[z]))
+  
+### Kalman Filter
+  
+x <- Stock[, 1]
+y <- Stock[, z]
+
+x$int <- rep(1, nrow(x))
+
+delta <- 0.0001
+Vw <- delta/(1-delta)*diag(2)
+Ve <- 0.001
+R <- matrix(rep(0, 4), nrow=2)
+P <- matrix(rep(0, 4), nrow=2)
+
+beta <- matrix(rep(0, nrow(y)*2), ncol=2)
+y_est <- rep(0, nrow(y))
+e <- rep(0, nrow(y))
+Q <- rep(0, nrow(y))
+
+for(i in 1:nrow(y)) {
+  if(i > 1) {
+    beta[i, ] <- beta[i-1, ] # state transition
+    R <- P + Vw # state cov prediction
+  }
+  y_est[i] <- x[i, ] %*% beta[i, ] # measurement prediction
+  Q[i] <- x[i, ] %*% R %*% t(x[i, ]) + Ve # measurement variance prediction
+  
+  # error between observation of y and prediction
+  e[i] <- y[i] - y_est[i]
+  K <- R %*% t(x[i, ]) / Q[i] # Kalman gain
+  
+  # state update
+  beta[i, ] <- beta[i, ] + K * e[i]
+  P = R - K %*% x[i, ] %*% R
+}
+
+beta <- xts(beta, order.by=index(Stock[,1]))
+
+print(plot(beta[2:nrow(beta), 1], type='l', main = 'Kalman updated hedge ratio'))
+#print(plot(beta[2:nrow(beta), 2], type='l', main = 'Kalman updated intercept'))
+
+# plot trade signals
+ e <- xts(e, order.by=index(pairs))
+  #sqrtQ <- xts(sqrt(Q), order.by=index(pairs))
+  sqrtQ<-runSD(e,20)
+  signals <- merge(e, sqrtQ, -sqrtQ)
+  colnames(signals) <- c("e", "sqrtQ", "negsqrtQ")
+
+signals <- merge(e, 1.5*sqrtQ, -1.5*sqrtQ)
+colnames(signals) <- c("e", "sqrtQ", "negsqrtQ")
+print(plot(signals[25:length(index(signals))], ylab='e', main = 'Trade signals at 1.5 standard deviation', col=c('blue', 'black', 'black'), lwd=c(1,2,2)))
+
+
+#Performing the stationarity tests on the dynamic spread
+
+  Tests<-data.frame(Asset=NA,PP=NA,ADF=NA,Decision=NA)
+
+  PP<-PP.test(as.numeric(e))$p.value
+  ADF<-adf.test(as.numeric(e))$p.value
+
+  Tests<-rbind(Tests,c(Assets[z],round(PP,4),round(ADF,4)))
+
+  Tests[-1,]%>%arrange(ADF)%>%mutate(Decision=ifelse(ADF<0.10,'Stationary','Non-Stationary'))%>%
+  kable(row.names=FALSE)%>%kable_styling(bootstrap_options = 'responsive')
+
+
+}
+
+```
+
+
+## **Case 1: `r Assets[2]`**
+```{r Case1,warning=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Kalman(z=2)
+
+```
+
+
+## **Case 2: `r Assets[3]`**
+```{r Case2,warning=FALSE,message=FALSE}
+
+Kalman(z=3)
+
+```
+
+
+## **Case 3: `r Assets[4]`**
+```{r Case3,warning=FALSE,message=FALSE}
+
+Kalman(z=4)
+
+```
+
+
+As we can see, there are several points that worth some consideration. First, note that the *hedge-ratio*, that is, the amount of shares of *BOVA11* for each share of the asset being analyzed needed to stabilize the relationship, presents substantial change over time. Thus, the *Kalman Filter* is a very useful too for this task, since updating the hedge-ratio allows us to capture some non-linear cointegration relationship among the two assets. Another way to see that is that, if we instead opt for doing a static *Ordinary Least Squares (OLS)* estimation, we would have a fixed hedge-ratio between the two assets, which would be unlikely to yield a stationary spread.
+
+Additionally, note that all the generated spreads are, according to the two unit-root tests applied, stationary series. Therefore, we use can our understanding of such stationary processes for creating pair trading strategies that exploits mean-reversion of the spread.
+
+## Implementing the pairs-trading strategy
+
+As we'seen, all spreads are considered stationary. Therefore, we can use any of the four assets considered in order to construct a pairs-trading strategy with *BOVA11*. The idea of such pairs-trading strategy lies in the following relationship:
+
+$$
+\widehat{P(Asset)_t}= \hat\delta_t \times [P(BOVA)_t],
+$$
+Where $P(Asset)_t$ is the price of the tradable ETF being analyzed, and *[P(BOVA)_t]* is the price of *BOVA11*, for each date $t$ and $\hat\delta_t$ is the beta coefficient estimated by the Kalman Filter. This equation, which has been estimated dynamically by the *Kalman Filter*, generates the **spread equation**:
+
+$$
+\hat\varepsilon_t \equiv Spread_t= P(Asset)_t -\widehat{P(Asset)_t}, \text{ where}\\
+\hat\varepsilon_t \text{ is a stationary process.}
+$$
+
+Therefore, the **pairs-trading strategy** can be summarize as follows:
+
+**1.** Use, for each asset, the estimated $\hat\delta$ to create the series of estimated results fot the estimated price of the asset, $\widehat{P(Asset)_t}$;
+
+**2.** Calculate the residual series, $\hat\varepsilon_t$, based on the estimate of **1.**;
+
+**3.** Based on $\hat\varepsilon_t$ and its corresponding standard errors, calculate a threshold $\phi^{\star}$ for implementing the strategy; and
+
+**4.** Compare the result of $\varepsilon$ with the threshold and decide whether to open a position.
+
+In order to avoid [data-snooping bias](https://web.ma.utexas.edu/users/mks/statmistakes/datasnooping.html), we calculate a **20-day rolling standard deviation** of the spread series, which both avoids using future information about the $\hat\varepsilon$ and adapts the threshold according to the volatility of the series. Thus, in periods of high volatility, the threshold widens to accomodate such shift into the behavior of the process. Likewise, when the series decay to lower levels of variability, the threshold gets narrower. We use these estimates to calculate the threshold of entering in a position.
+
+Additionaly, is the decision in **4.** is to open a position, we must also provide a criteria for exiting the operation. While we have inumerous criteria available, we'll focus on two: mean reversion towards the threshold band and half-life of the process. 
+
+The first one is intuitive: we, for each new value of the assets, the **observed $\varepsilon_t$**, and check whether it falls inside of outside of the bands. Whenever it comes back to a value inside the threshold band, it indicates that our process is already mean reverting and we can close the strategy. As an arbitrary choice, we'll use **$\pm 1.5\times\hat\varepsilon$ as our threshold**.
+
+Note, however, that while some processes have very small arbitrage opportunities, in other cases, it may take some time to the process mean-revert. Therefore, we'll use another criteria, based on the **estimated time to mean-reversion**, by calculating the **half-life** of the process, denoted by $\lambda$, we determine the average estimated time (in days) for a process to convert. Then, we'll use $\lambda$ as our terminal criterion for exiting the position.
+
+These estimates are going to be calculated on a daily basis taking into account the closing prices of the day $t$ to get an estimate for the parameters that are going to be used in $t+1$: the threshold, half-life and the hedge-ratio. Note that in one of our tables, the criterion for *Open Position* and *Don't Open*, for each $t$, are based on the parameters for the hedge-ratio in $t-1$. Therefore, one must take into account that these decisions are solely based on what was the information set in $t-1$.
+
+For trading purposes, it is important to consider **Table 2**, which summarizes the new, updated parameters that can be used for trading purposes in period $t$.
+
+
+```{r report, warning=FALSE,message=FALSE}
+
+Table_Results<-data.frame(
+  
+  Asset=NA,
+  Spread=NA,
+  StdDev=NA,
+  Result=NA,
+  Long=NA,
+  Short=NA)
+
+Parameters<-data.frame(
+  
+  Asset=NA,
+  PriceAsset=NA,
+  PriceBOVA=NA,
+  Threshold=NA,
+  Hedge=NA,
+  HalfLife=NA,
+  SizePosition=NA)
+  
+  Kalman<-function(z){
+  
+  
+    pairs<-cbind(Stock[,1],
+                 Stock[,z])
+    
+    names(pairs)<-c('BOVA11',paste0(Assets[z]))
+  
+### Kalman Filter
+  
+x <- Stock[, 1]
+y <- Stock[, z]
+
+x$int <- rep(1, nrow(x))
+
+delta <- 0.0001
+Vw <- delta/(1-delta)*diag(2)
+Ve <- 0.001
+R <- matrix(rep(0, 4), nrow=2)
+P <- matrix(rep(0, 4), nrow=2)
+
+beta <- matrix(rep(0, nrow(y)*2), ncol=2)
+y_est <- rep(0, nrow(y))
+e <- rep(0, nrow(y))
+Q <- rep(0, nrow(y))
+
+for(i in 1:nrow(y)) {
+  if(i > 1) {
+    beta[i, ] <- beta[i-1, ] # state transition
+    R <- P + Vw # state cov prediction
+  }
+  y_est[i] <- x[i, ] %*% beta[i, ] # measurement prediction
+  Q[i] <- x[i, ] %*% R %*% t(x[i, ]) + Ve # measurement variance prediction
+  
+  # error between observation of y and prediction
+  e[i] <- y[i] - y_est[i]
+  K <- R %*% t(x[i, ]) / Q[i] # Kalman gain
+  
+  # state update
+  beta[i, ] <- beta[i, ] + K * e[i]
+  P = R - K %*% x[i, ] %*% R
+}
+
+beta <- xts(beta, order.by=index(Stock[,1]))
+
+# plot trade signals
+ e <- xts(e, order.by=index(pairs))
+  #sqrtQ <- xts(sqrt(Q), order.by=index(pairs))
+  sqrtQ<-runSD(e,20)
+  signals <- merge(e, sqrtQ, -sqrtQ)
+  colnames(signals) <- c("e", "sqrtQ", "negsqrtQ")
+
+signals <- merge(e, 1.5*sqrtQ, -1.5*sqrtQ)
+colnames(signals) <- c("e", "sqrtQ", "negsqrtQ")
+print(plot(signals[25:length(index(signals))], ylab='e', main = 'Trade signals at 1.5 standard deviation', col=c('blue', 'black', 'black'), lwd=c(1,2,2)))
+
+
+# Speed of reversion
+
+
+half_life <- function(series) {
+  
+  delta_P <- diff(series)
+  mu <- mean(series)
+  lag_P <- Lag(series) - mu
+  model <- lm(delta_P ~ lag_P)
+  lambda <- model$coefficients[2]
+  H <- -log(2)/lambda
+  
+  return(H)
+}
+
+H <- half_life(e[,1]) #In Days
+
+## Results for tables
+
+Results<-data.frame(
+  
+  Asset=Assets[z],
+  Spread=round(last(e),3),
+  StdDev=round(last(sqrtQ),3),
+  Result=ifelse(last(e)>1.5*last(sqrtQ),"Open Position",
+         ifelse(last(e)<1.5*-last(sqrtQ),"Open Position","Don't Open")),
+  
+  Long=  ifelse(last(e)>1.5*last(sqrtQ),"BOVA11.SA",
+         ifelse(last(e)<1.5*-last(sqrtQ),Assets[z],"-")),
+         
+  Short= ifelse(last(e)>1.5*last(sqrtQ),Assets[z],
+         ifelse(last(e)<1.5*-last(sqrtQ),"BOVA11.SA","-")))
+
+Table_Results<<-rbind(Table_Results,Results)
+
+Results_2<-data.frame(
+  
+  Asset=Assets[z],
+  PriceAsset=last(Stock[,z]),
+  PriceBOVA=last(Stock[,1]),
+  Threshold=round(1.5*last(sqrtQ),3),
+  Hedge=last(beta[,1]),
+  HalfLife=H,
+  SizePosition=round(last(beta[,1]),1))
+
+Parameters<<-rbind(Parameters,Results_2)
+  
+  }
+
+  
+for(z in 2:length(Assets)){
+  Kalman(z)
+}
+
+  
+Table_Results<-Table_Results[-1,]
+Table_Results%>%arrange(desc(abs(Spread)))%>%
+  kable(row.names=FALSE)%>%kable_styling(bootstrap_options = 'responsive')
+
+Parameters<-Parameters[-1,]
+
+Parameters%>%
+  kable(row.names=FALSE)%>%kable_styling(bootstrap_options = 'responsive')
+
+```
+
+
+To sum up, let's write a *.csv* file in order to use the output for other applications by using the function `write.csv()`:
+
+```{r csv,warning=FALSE,message=FALSE}
+
+#How to choose assets that have the desired signs altoghether? Let's create a directory and store the files there.
+
+dir.create(format(as.Date(Sys.Date()),format='%d.%m'))
+
+setwd(paste0('C:/Users/Lucas/Google Drive/Estudos/R Projects/GITHub/Quantitative Trading/',format(as.Date(Sys.Date()),format='%d.%m'),'/'))
+
+write.csv2(Parameters,paste0('Report_',Sys.Date(),'.csv'))
+
+```

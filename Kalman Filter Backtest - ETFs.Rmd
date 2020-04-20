@@ -1,0 +1,302 @@
+---
+title: "Pairs Trading using the Kalman Filter"
+author: "Lucas S. Macoris"
+date: "14/03/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## **About this document**
+
+This document is an application of a Pairs Trading Strategy using the Kalman Filter in order to dinamically update the hedge ratios of a pair of assets. This example is based on *Kris Longmore's* post [*"Kalman Filter Example: Pairs Trading in R*"](https://robotwealth.com/kalman-filter-pairs-trading-r/) in [RobotWealth](https://robotwealth.com/).
+
+In this sense, we'll proceed by the following steps:
+
+1. Select a bundle of ETF brazilian traded securities;
+2. Perform cointegration and unit-root testing in several pairs of such assets;
+3. Perform the pairs trading analysis with each pair; and
+4. Compare the results and point to which pairs are the most interesting to trade on.
+
+```{r packages, warning=FALSE,message=FALSE}
+
+#Loading the necessary packages
+
+library(quantmod)
+library(pracma)
+library(kableExtra)
+library(dplyr)
+library(PairTrading)
+
+```
+
+## **How to find profitable pair trading opportunities?**
+
+```{r Source,warning=FALSE,message=FALSE}
+
+Assets<-c('BOVA11.SA',
+          'BBSD11.SA',
+          'BRAX11.SA',
+          'ECOO11.SA',
+          'SMAL11.SA',
+          'BOVV11.SA',
+          'DIVO11.SA',
+          'FIND11.SA',
+          'GOVE11.SA',
+          'MATB11.SA',
+          'ISUS11.SA',
+          'PIBB11.SA',
+          'SPXI11.SA')
+
+
+getSymbols(Assets[1],from='2019-01-01',to=Sys.Date()-20)
+
+Stock<-data.frame(BOVA11.SA=na.locf(BOVA11.SA[,6]))%>%as.xts(order.by=index(BOVA11.SA))
+
+for (i in 2:length(Assets)){
+  
+  Asset<-na.locf(getSymbols(Assets[i],from='2019-01-01',to=Sys.Date()-20,auto.assign = FALSE)[,6])
+  
+  Stock<<-cbind(Stock,Asset)
+  
+  }
+
+rm(list=ls()[-c(2,5)])
+
+
+for (i in 2:length(Assets)){
+  
+pairs<-cbind(Stock[,1],
+             Stock[,i])
+  
+names(pairs)<-c('BOVA11',paste0(Assets[i]))
+assign(paste0('G',i),plot(pairs, legend.loc=1,main=''))
+
+}
+
+
+#Check for stationarity
+
+Tests<-data.frame(Asset=NA,PP=NA,ADF=NA,Decision=NA)
+
+for (i in 2:length(Assets)){
+  
+  PP<-PP.test(as.numeric(Stock[,1]-Stock[,i]))$p.value
+  ADF<-adf.test(as.numeric(Stock[,1]-Stock[,i]),k=1)$p.value
+
+  Tests<-rbind(Tests,c(Assets[i],round(PP,4),round(ADF,4)))
+}
+
+Tests[-1,]%>%arrange(ADF)%>%mutate(Decision=ifelse(ADF<0.10,'Stationary','Non-Stationary'))%>%
+  kable(row.names=FALSE)%>%kable_styling(bootstrap_options = 'responsive')
+
+
+```
+
+
+## **Allowing for time-varying relationship: the use of the Kalman Filter**
+
+```{r Kalman Filter}
+
+Analysis<-function(z){
+  
+plot(get(paste0('G',z)))
+  
+### Kalman Filter
+  
+x <- Stock[, 1]
+y <- Stock[, z]
+
+x$int <- rep(1, nrow(x))
+
+delta <- 0.0001
+Vw <- delta/(1-delta)*diag(2)
+Ve <- 0.001
+R <- matrix(rep(0, 4), nrow=2)
+P <- matrix(rep(0, 4), nrow=2)
+
+beta <- matrix(rep(0, nrow(y)*2), ncol=2)
+y_est <- rep(0, nrow(y))
+e <- rep(0, nrow(y))
+Q <- rep(0, nrow(y))
+
+for(i in 1:nrow(y)) {
+  if(i > 1) {
+    beta[i, ] <- beta[i-1, ] # state transition
+    R <- P + Vw # state cov prediction
+  }
+  y_est[i] <- x[i, ] %*% beta[i, ] # measurement prediction
+  Q[i] <- x[i, ] %*% R %*% t(x[i, ]) + Ve # measurement variance prediction
+  
+  # error between observation of y and prediction
+  e[i] <- y[i] - y_est[i]
+  K <- R %*% t(x[i, ]) / Q[i] # Kalman gain
+  
+  # state update
+  beta[i, ] <- beta[i, ] + K * e[i]
+  P = R - K %*% x[i, ] %*% R
+}
+
+beta <- xts(beta, order.by=index(Stock[,1]))
+
+par(mfrow=c(2,1))
+
+print(plot(beta[2:nrow(beta), 1], type='l', main = 'Kalman updated hedge ratio'))
+print(plot(beta[2:nrow(beta), 2], type='l', main = 'Kalman updated intercept'))
+
+
+# plot trade signals
+e <- xts(e, order.by=index(pairs))
+sqrtQ <- xts(sqrt(Q), order.by=index(pairs))
+signals <- merge(e, sqrtQ, -sqrtQ)
+colnames(signals) <- c("e", "sqrtQ", "negsqrtQ")
+#plot(signals[3:length(index(signals))], ylab='e', main = 'Trade signals at one-standard deviation', col=c('blue', 'black', 'black'), lwd=c(1,2,2))
+
+
+# more aggressive trade signals
+signals <- merge(e, .5*sqrtQ, -.5*sqrtQ)
+colnames(signals) <- c("e", "sqrtQ", "negsqrtQ")
+print(plot(signals[3:length(index(signals))], ylab='e', main = 'Trade signals at one-standard deviation', col=c('blue', 'black', 'black'), lwd=c(1,2,2)))
+
+
+
+# vectorised backtest 
+sig <- ifelse((signals[1:length(index(signals))]$e > signals[1:length(index(signals))]$sqrtQ) & (lag.xts(signals$e, 1) < lag.xts(signals$sqrtQ, 1)), -1, 
+              ifelse((signals[1:length(index(signals))]$e < signals[1:length(index(signals))]$negsqrtQ) & (lag.xts(signals$e, 1) > lag.xts(signals$negsqrtQ, 1)), 1, 0))
+
+colnames(sig) <- "sig"
+
+## trick for getting only the first signals
+sig[sig == 0] <- NA
+sig <- na.locf(sig)
+sig <- diff(sig)/2
+plot(sig)
+
+## simulate positions and pnl
+sim <- merge(lag.xts(sig,1), beta[, 1], x[, 1], y)
+colnames(sim) <- c("sig", "hedge", 'Asset 1', 'Asset 2')
+sim$posX <- sim$sig * -1000 * sim$hedge
+sim$posY <- sim$sig * 1000   
+sim$posX[sim$posX == 0] <- NA
+sim$posX <- na.locf(sim$posX)
+sim$posY[sim$posY == 0] <- NA
+sim$posY <- na.locf(sim$posY)
+
+pnlX <- sim$posX * diff(sim[, 3])
+pnlY <- sim$posY * diff(sim[, 4])
+pnl <- pnlX + pnlY
+print(plot(cumsum(na.omit(pnl)), main="Cumulative PnL, $"))
+
+}
+```
+
+
+## **Case 1: `r Assets[2]`**
+```{r Case1,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=2)
+
+```
+
+
+## **Case 2: `r Assets[3]`**
+```{r Case2,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=3)
+
+```
+
+
+## **Case 3: `r Assets[4]`**
+```{r Case3,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=4)
+
+```
+
+
+## **Case 4: `r Assets[5]`**
+```{r Case4,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=5)
+
+```
+
+
+## **Case 5: `r Assets[6]`**
+```{r Case5,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=6)
+
+```
+
+
+## **Case 6: `r Assets[7]`**
+```{r Case6,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=7)
+
+```
+
+
+## **Case 7: `r Assets[8]`**
+```{r Case7,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=8)
+
+```
+
+
+## **Case 8: `r Assets[9]`**
+```{r Case8,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=9)
+
+```
+
+
+## **Case 9: `r Assets[10]`**
+```{r Case9,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=10)
+
+```
+
+
+## **Case 10: `r Assets[11]`**
+```{r Case10,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=11)
+
+```
+
+
+## **Case 11: `r Assets[12]`**
+```{r Case11,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=12)
+
+```
+
+
+## **Case 12: `r Assets[13]`**
+```{r Case12,warnings=FALSE,message=FALSE}
+
+par(mfrow=c(1,1))
+Analysis(z=13)
+
+```
