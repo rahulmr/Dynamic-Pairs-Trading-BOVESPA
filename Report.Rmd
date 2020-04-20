@@ -1,5 +1,5 @@
 ---
-title: "Long & Short trading with brazilian ETF's"
+title: "Long & Short automated report for trading with brazilian ETF's"
 author: 
 - name: "Lucas S. Macoris"
   affiliation: "PhD Student at Insper - Institute of Research - São Paulo - Brazil"
@@ -44,7 +44,7 @@ By having a first look at the available *ETFs* traded in *B3*, only some of them
 
 ```{r Source,warning=FALSE,message=FALSE}
 
-BOVA11.SA<-read.csv('BOVA11.csv',sep='')[,c(1,5)]
+BOVA11.SA<-read.csv('BOVA11.csv',sep=';')[,c(1,5)]
 names(BOVA11.SA)<-c('Date','Close')
 
 SMAL11.SA<-read.csv('SMAL11.csv',sep='')[,c(1,5)]
@@ -398,10 +398,6 @@ To sum up, let's write a *.csv* file in order to use the output for other applic
 ```{r csv,warning=FALSE,message=FALSE}
 
 #How to choose assets that have the desired signs altoghether? Let's create a directory and store the files there.
-
-dir.create(format(as.Date(Sys.Date()),format='%d.%m'))
-
-setwd(paste0('C:/Users/Lucas/Google Drive/Estudos/R Projects/GITHub/Quantitative Trading/',format(as.Date(Sys.Date()),format='%d.%m'),'/'))
 
 write.csv2(Parameters,paste0('Report_',Sys.Date(),'.csv'))
 

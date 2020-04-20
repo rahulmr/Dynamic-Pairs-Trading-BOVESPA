@@ -1,7 +1,10 @@
 ---
-title: "Pairs Trading using the Kalman Filter"
-author: "Lucas S. Macoris"
-date: "14/03/2020"
+title: "Dynamic Pairs Trading strategy for brazilian ETF securities using the Kalman Filter"
+author: 
+- name: "Lucas S. Macoris"
+  affiliation: "PhD Student at Insper - Institute of Research - São Paulo - Brazil"
+  email: "Contact: lucassm4@al.insper.edu.br"
+date: "`r paste0('Date: ',Sys.Date())`"
 output: html_document
 ---
 

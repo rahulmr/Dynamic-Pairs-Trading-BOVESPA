@@ -30,4 +30,6 @@ After that, the second file, `Report`, uses the insights highlighted in the firs
 3. Create Threshold rules for entering into Long/Short Operations; and
 4. Provide, based on the last trading day information, the 1-step-ahead forecasts for the coefficients of the Long-Short equation, for each synthetic pair.
 
-**Important Remark:** for this application, I've used downloaded data from the MetaTrader server. The reason for that is that it also provide data intraday data (like 1M ticks, for example) that are highly useful for backtesting purposes. In this file, I haven't considered backtesting strategies using intraday data, but the extrapolation from the simple backtesting procedure considered here is straighforward.
+**Important Remark:** for this second application, I've used downloaded data from the **MetaTrader** server. The reason for that is that it also provide data intraday data (like 1M ticks, for example) that are highly useful for backtesting purposes. In this file, I haven't considered backtesting strategies using intraday data, but the extrapolation from the simple backtesting procedure considered here is straighforward.
+
+Additionally, Yahoo! Finance data may contain some measurement errors. Yahoo! Finance generally offers data with splits and dividends adjustments and therefore may not be the same as the brokerage information. In this sense, recommendations must also be analyzed through technical indicators presented on the brokerage account.
